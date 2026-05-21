@@ -2,12 +2,8 @@
 set -e
 
 if [ -n "$DATABASE_URL" ]; then
-  PSQL_DATABASE_URL=$(echo "$DATABASE_URL" | sed 's/^postgresql+psycopg2:/postgresql:/')
-
   echo "Waiting for database to be ready..."
-  until pg_isready -d "$PSQL_DATABASE_URL" >/dev/null 2>&1; do
-    sleep 1
-  done
+  sleep 5
 
   if [ "${RUN_MIGRATIONS:-true}" = "true" ] && [ -f "/app/alembic.ini" ]; then
     echo "Running Alembic migrations..."
@@ -29,4 +25,8 @@ else
   echo "DATABASE_URL is not set; skipping migrations and seed."
 fi
 
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+if [ "${ENV:-production}" = "development" ]; then
+  exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+else
+  exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+fi
