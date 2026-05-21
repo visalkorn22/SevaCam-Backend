@@ -344,7 +344,6 @@ def google_callback(
 
     frontend = settings.FRONTEND_URL.rstrip("/")
     redirect_response = RedirectResponse(
-        f"{frontend}/auth/google/callback", status_code=302
+        f"{frontend}/auth/google/callback?token={token}", status_code=302
     )
-    set_auth_cookie(redirect_response, token)
     return redirect_response
