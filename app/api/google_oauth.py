@@ -100,6 +100,8 @@ def _exchange_code(code: str) -> dict:
         timeout=10.0,
     )
     if res.status_code != 200:
+        import logging
+        logging.error(f"[Google OAuth] Token exchange failed ({res.status_code}): {res.text}")
         raise ValueError(f"Token exchange failed ({res.status_code}): {res.text}")
     return res.json()
 
