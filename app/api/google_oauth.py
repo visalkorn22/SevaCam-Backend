@@ -230,10 +230,15 @@ def google_callback(
     mode = state_payload.get("mode", "login")
     nonce = state_payload["nonce"]
 
+    import logging
+    logger = logging.getLogger(__name__)
+
     # 2. Exchange authorization code for tokens (server-to-server)
     try:
         tokens = _exchange_code(code)
-    except ValueError:
+        logger.error("[OAuth step2] token exchange OK")
+    except ValueError as e:
+        logger.error(f"[OAuth step2] token exchange FAILED: {e}")
         return RedirectResponse(
             _frontend_error_url(mode, "google_failed"), status_code=302
         )
@@ -241,6 +246,7 @@ def google_callback(
     id_token_str = tokens.get("id_token")
     access_token = tokens.get("access_token")
     if not id_token_str or not access_token:
+        logger.error("[OAuth step2] missing id_token or access_token")
         return RedirectResponse(
             _frontend_error_url(mode, "google_failed"), status_code=302
         )
@@ -248,7 +254,9 @@ def google_callback(
     # 3. Verify id_token signature and claims (iss, aud, exp, nonce)
     try:
         claims = _verify_google_id_token(id_token_str, nonce, access_token)
-    except ValueError:
+        logger.error("[OAuth step3] id_token verified OK")
+    except ValueError as e:
+        logger.error(f"[OAuth step3] id_token verification FAILED: {e}")
         return RedirectResponse(
             _frontend_error_url(mode, "google_failed"), status_code=302
         )
@@ -256,6 +264,7 @@ def google_callback(
     email = claims.get("email")
     email_verified = claims.get("email_verified", False)
     if not email or not email_verified:
+        logger.error(f"[OAuth step3] email missing or unverified: {email}, {email_verified}")
         return RedirectResponse(
             _frontend_error_url(mode, "google_failed"), status_code=302
         )
@@ -281,6 +290,7 @@ def google_callback(
             text("SELECT 1 FROM roles WHERE name = :role"), {"role": role}
         ).fetchone()
         if not role_exists:
+            logger.error("[OAuth step5] 'customer' role not found in roles table")
             return RedirectResponse(
                 _frontend_error_url(mode, "google_failed"), status_code=302
             )
