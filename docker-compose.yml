@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:16
+    container_name: booking_db
+    environment:
+      POSTGRES_USER: booking_user
+      POSTGRES_PASSWORD: booking_pass
+      POSTGRES_DB: booking_database
+    ports:
+      - "5432:5432"
+    volumes:
+      - booking_db_data:/var/lib/postgresql/data
+
+  backend:
+    build: .
+    container_name: booking_backend
+    env_file:
+      - .env
+    environment:
+      RUN_MIGRATIONS: "true"
+      RUN_SEED: "true"
+      FEATURE_SET: "full"
+      MIGRATION_SQL_PATH: "${MIGRATION_SQL_PATH:-/repo/scripts/001_create_tables.sql}"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      - .:/app
+      - ..:/repo
+      - ./uploads:/app/app/uploads
+
+volumes:
+  booking_db_data:
