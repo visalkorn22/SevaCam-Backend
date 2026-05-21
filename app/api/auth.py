@@ -302,7 +302,7 @@ def login(
     db.commit()
     set_auth_cookie(response, token)
 
-    return {"user": dict(user._mapping)}
+    return {"user": dict(user._mapping), "token": token}
 
 
 # =========================
