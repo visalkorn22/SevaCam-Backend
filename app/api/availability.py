@@ -1,5 +1,7 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+logger = logging.getLogger(__name__)
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional, Dict, Tuple
@@ -610,6 +612,13 @@ def _compute_slots_for_date(
 
         slots_added = 0
         slot_limit = int(max_slots_per_day) if max_slots_per_day is not None else None
+
+        logger.warning(
+            f"[SLOT_DEBUG] date={target_date} staff={staff_name} "
+            f"duration={duration} buffer={buffer_minutes} total={total_minutes} "
+            f"intervals={[(str(s), str(e)) for s, e in intervals]} "
+            f"min_notice_cutoff={min_notice_cutoff}"
+        )
 
         for start_dt, end_dt in intervals:
             cursor = _round_up_to_granularity(start_dt, granularity_minutes)
