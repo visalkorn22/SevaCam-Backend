@@ -24,8 +24,8 @@ async def get_booking_stats(
             COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_bookings,
             COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_bookings,
             COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_bookings,
-            COALESCE(SUM(CASE WHEN b.payment_status = 'paid' THEN s.price ELSE 0 END), 0) as total_revenue,
-            COALESCE(AVG(CASE WHEN b.payment_status = 'paid' THEN s.price END), 0) as average_booking_value
+            COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.booking_id = b.id AND p.status = 'completed'), 0) as total_revenue,
+            COALESCE(AVG((SELECT SUM(p.amount) FROM payments p WHERE p.booking_id = b.id AND p.status = 'completed')), 0) as average_booking_value
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         WHERE 1=1
@@ -65,7 +65,7 @@ async def get_service_stats(
             s.id as service_id,
             s.name as service_name,
             COUNT(b.id) as total_bookings,
-            COALESCE(SUM(CASE WHEN b.payment_status = 'paid' THEN s.price ELSE 0 END), 0) as total_revenue,
+            COALESCE(SUM((SELECT COALESCE(SUM(p.amount), 0) FROM payments p WHERE p.booking_id = b.id AND p.status = 'completed')), 0) as total_revenue,
             AVG(r.rating) as average_rating
         FROM services s
         LEFT JOIN bookings b ON s.id = b.service_id
@@ -111,7 +111,7 @@ async def get_staff_stats(
             u.full_name as staff_name,
             COUNT(b.id) as total_bookings,
             COUNT(CASE WHEN b.status = 'completed' THEN 1 END) as completed_bookings,
-            COALESCE(SUM(CASE WHEN b.payment_status = 'paid' THEN s.price ELSE 0 END), 0) as total_revenue,
+            COALESCE(SUM((SELECT COALESCE(SUM(p.amount), 0) FROM payments p WHERE p.booking_id = b.id AND p.status = 'completed')), 0) as total_revenue,
             AVG(r.rating) as average_rating
         FROM users u
         LEFT JOIN bookings b ON u.id = b.staff_id
@@ -157,20 +157,19 @@ async def get_daily_stats(
         SELECT 
             DATE(b.created_at) as date,
             COUNT(b.id) as total_bookings,
-            COALESCE(SUM(CASE WHEN b.payment_status = 'paid' THEN s.price ELSE 0 END), 0) as total_revenue
+            COALESCE(SUM((SELECT COALESCE(SUM(p.amount), 0) FROM payments p WHERE p.booking_id = b.id AND p.status = 'completed')), 0) as total_revenue
         FROM bookings b
-        LEFT JOIN services s ON b.service_id = s.id
         WHERE 1=1
     """
     params = {}
-    
+
     if start_date:
         query += " AND DATE(b.created_at) >= :start_date"
         params["start_date"] = start_date
     if end_date:
         query += " AND DATE(b.created_at) <= :end_date"
         params["end_date"] = end_date
-    
+
     query += " GROUP BY DATE(b.created_at) ORDER BY date DESC"
     
     result = db.execute(query, params)
@@ -194,9 +193,9 @@ async def get_admin_stats(
     booking_result = db.execute("SELECT COUNT(*) FROM bookings").fetchone()
     revenue_result = db.execute(
         """
-        SELECT COALESCE(SUM(CASE WHEN b.payment_status = 'paid' THEN s.price ELSE 0 END), 0)
-        FROM bookings b
-        LEFT JOIN services s ON b.service_id = s.id
+        SELECT COALESCE(SUM(p.amount), 0)
+        FROM payments p
+        WHERE p.status = 'completed'
         """
     ).fetchone()
     user_result = db.execute(
@@ -224,9 +223,9 @@ async def get_admin_dashboard(
     ).fetchone()
     revenue = db.execute(
         """
-        SELECT COALESCE(SUM(CASE WHEN b.payment_status = 'paid' THEN s.price ELSE 0 END), 0)
-        FROM bookings b
-        LEFT JOIN services s ON b.service_id = s.id
+        SELECT COALESCE(SUM(p.amount), 0)
+        FROM payments p
+        WHERE p.status = 'completed'
         """
     ).fetchone()
     avg_rating = db.execute(

@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List
 from app.core.database import get_db
-from app.core.auth import get_current_user, is_admin
+from app.core.auth import get_current_user, is_admin, require_roles
 from app.core.config import settings
 from app.core.notify import (
     build_booking_email,
@@ -1667,6 +1667,45 @@ async def get_booking_payments(
     
     payments = result.fetchall()
     return [_serialize_payment_response(dict(row._mapping)) for row in payments]
+
+@router.post("/admin/sweep-khqr")
+async def sweep_khqr_payments(
+    current_user: dict = Depends(require_roles("admin", "superadmin")),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin: check all pending KHQR payments and update their status.
+    Expires sessions older than KHQR_QR_LIFETIME_MINUTES and confirms
+    any that Bakong reports as completed.
+    """
+    rows = db.execute(
+        text(
+            """
+            SELECT * FROM payments
+            WHERE provider = 'bakong_khqr' AND status = 'pending'
+            ORDER BY created_at ASC
+            """
+        )
+    ).mappings().all()
+
+    results = {"expired": 0, "completed": 0, "still_pending": 0, "errors": 0}
+    for row in rows:
+        payment = dict(row)
+        try:
+            updated = await _sync_khqr_payment_status(db, payment=payment)
+            final = str(updated.get("status", "pending"))
+            if final == "failed":
+                results["expired"] += 1
+            elif final == "completed":
+                results["completed"] += 1
+            else:
+                results["still_pending"] += 1
+        except Exception as exc:
+            logger.warning("sweep_khqr_payments error for payment %s: %s", payment.get("id"), exc)
+            results["errors"] += 1
+
+    return {"message": "KHQR sweep complete", "results": results}
+
 
 @router.post("/{payment_id}/refund")
 async def refund_payment(
