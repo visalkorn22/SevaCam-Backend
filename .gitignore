@@ -47,3 +47,4 @@ alembic/versions/__pycache__/
 cookies.txt
 reading/
 transferring/
+.env.render

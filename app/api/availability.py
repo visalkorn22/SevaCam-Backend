@@ -134,17 +134,21 @@ def _intersect_intervals(
                 result.append((start, end))
     return _merge_intervals(result)
 
+def _to_backend_weekday(target_date: date) -> int:
+    """Convert Python weekday (Mon=0) to the backend convention (Sun=0)."""
+    return (target_date.weekday() + 1) % 7
+
 def _is_nth_weekday_in_month(target_date: date, weekday: int, nth: int) -> bool:
-    if target_date.weekday() != weekday:
+    if _to_backend_weekday(target_date) != weekday:
         return False
     first_day = target_date.replace(day=1)
-    offset = (weekday - first_day.weekday()) % 7
+    offset = (weekday - _to_backend_weekday(first_day)) % 7
     first_occurrence = 1 + offset
     occurrence = ((target_date.day - first_occurrence) // 7) + 1
     if nth == -1:
         last_day = calendar.monthrange(target_date.year, target_date.month)[1]
         last_date = target_date.replace(day=last_day)
-        last_offset = (last_date.weekday() - weekday) % 7
+        last_offset = (_to_backend_weekday(last_date) - weekday) % 7
         last_occurrence_day = last_day - last_offset
         return target_date.day == last_occurrence_day
     return occurrence == nth
@@ -178,7 +182,7 @@ def _get_service_operating_intervals(
 
     service_day_start = datetime.combine(target_date, time(0, 0), tzinfo=service_tz)
     service_day_end = service_day_start + timedelta(days=1)
-    service_weekday = (service_day_start.weekday() + 1) % 7
+    service_weekday = _to_backend_weekday(target_date)
 
     if not schedule:
         return [(service_day_start.astimezone(utc), service_day_end.astimezone(utc))]
@@ -411,7 +415,7 @@ def _compute_slots_for_date(
         if day_start.date() > max_booking_cutoff.date():
             continue
 
-        weekday = (day_start.weekday() + 1) % 7
+        weekday = _to_backend_weekday(target_date)
 
         work_blocks = db.execute(
             text(
@@ -2031,7 +2035,7 @@ async def get_availability_calendar(
                 day_start_utc = day_start_local.astimezone(dt_timezone.utc)
                 day_end_utc = day_end_local.astimezone(dt_timezone.utc)
 
-                weekday = (day_start_local.weekday() + 1) % 7
+                weekday = _to_backend_weekday(current_date)
                 work_blocks = db.execute(
                     """
                     SELECT start_time_local, end_time_local

@@ -5,7 +5,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime, timedelta, time, date, timezone as dt_timezone
-import calendar
 import json
 import logging
 from decimal import Decimal
@@ -14,7 +13,11 @@ from app.core.database import get_db
 from app.core.auth import get_current_user, is_admin
 from app.core.config import settings
 from app.core.notify import send_email_notification, get_booking_email_context, build_booking_email
-from app.api.availability import _compute_slots_for_date
+from app.api.availability import (
+    _compute_slots_for_date,
+    _is_nth_weekday_in_month,
+    _to_backend_weekday,
+)
 from app.models.schemas import (
     BookingCreate, BookingUpdate, BookingResponse, BookingWithDetails,
     BookingLogResponse, BookingChangeResponse
@@ -444,21 +447,6 @@ def _iter_next_available_slots(
             break
     return slots
 
-def _is_nth_weekday_in_month(target_date: date, weekday: int, nth: int) -> bool:
-    if target_date.weekday() != weekday:
-        return False
-    first_day = target_date.replace(day=1)
-    offset = (weekday - first_day.weekday()) % 7
-    first_occurrence = 1 + offset
-    occurrence = ((target_date.day - first_occurrence) // 7) + 1
-    if nth == -1:
-        last_day = calendar.monthrange(target_date.year, target_date.month)[1]
-        last_date = target_date.replace(day=last_day)
-        last_offset = (last_date.weekday() - weekday) % 7
-        last_occurrence_day = last_day - last_offset
-        return target_date.day == last_occurrence_day
-    return occurrence == nth
-
 def _service_allows_booking(
     db: Session,
     service_id: str,
@@ -519,7 +507,7 @@ def _service_allows_booking(
     rule_type = schedule_map.get("rule_type")
     open_time = schedule_map.get("open_time")
     close_time = schedule_map.get("close_time")
-    weekday = (local_start.weekday() + 1) % 7
+    weekday = _to_backend_weekday(local_start.date())
 
     if rule_type == "daily":
         if open_time and close_time:
