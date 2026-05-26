@@ -135,4 +135,5 @@ class KHQRService:
             md5,
             jwt_token=self._settings.KHQR_JWT_TOKEN,
             check_endpoint=self._settings.KHQR_CHECK_ENDPOINT,
+            proxy_secret=getattr(self._settings, "KHQR_PROXY_SECRET", None) or None,
         )

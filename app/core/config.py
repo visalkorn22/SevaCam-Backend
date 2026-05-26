@@ -144,6 +144,7 @@ class Settings(BaseSettings):
     KHQR_MERCHANT_CATEGORY_CODE: int = 5999   # ISO 18245 MCC (5999 = misc retail)
     KHQR_DEFAULT_CURRENCY: str = "USD"        # "USD" or "KHR"
     KHQR_QR_LIFETIME_MINUTES: int = 10        # session TTL shown to customer
+    KHQR_PROXY_SECRET: Optional[str] = None  # set if routing status checks via Cloudflare Worker
 
     # =========================
     # Telegram Bot

@@ -54,6 +54,7 @@ async def check_by_md5(
     *,
     jwt_token: str,
     check_endpoint: str,
+    proxy_secret: str | None = None,
 ) -> KHQRStatusResult:
     """
     Async check of a KHQR transaction status using its MD5 hash.
@@ -74,6 +75,8 @@ async def check_by_md5(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {jwt_token}",
     }
+    if proxy_secret:
+        headers["X-Proxy-Secret"] = proxy_secret
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
