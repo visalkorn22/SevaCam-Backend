@@ -26,6 +26,7 @@ class KHQRPaymentStatus(str, Enum):
     PENDING = "pending"      # Not found yet — keep polling
     COMPLETED = "completed"  # responseCode == 0, money received
     ERROR = "error"          # Network / decode error — retry later
+    GEO_BLOCKED = "geo_blocked"  # Bakong API blocked our server IP (403) — stop polling
 
 
 @dataclass
@@ -96,6 +97,18 @@ async def check_by_md5(
             status=KHQRPaymentStatus.ERROR,
             response_code=401,
             response_message="Unauthorised — JWT may be expired or invalid",
+        )
+
+    if response.status_code == 403:
+        logger.error(
+            "Bakong API IP-blocked (403) — this server's IP is not whitelisted by NBC. "
+            "Manual payment confirmation required. md5=%s",
+            md5,
+        )
+        return KHQRStatusResult(
+            status=KHQRPaymentStatus.GEO_BLOCKED,
+            response_code=403,
+            response_message="Bakong API blocked this server's IP address (403). Manual confirmation needed.",
         )
 
     if not response.is_success:

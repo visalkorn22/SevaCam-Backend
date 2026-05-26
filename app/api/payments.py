@@ -1203,6 +1203,11 @@ async def _sync_khqr_payment_status(db: Session, *, payment: dict) -> dict:
     if not md5:
         return payment
 
+    # Skip if already flagged as geo-blocked — Bakong API won't answer from this server
+    metadata = _coerce_metadata(payment.get("metadata"))
+    if metadata.get("khqr_geo_blocked"):
+        return payment
+
     # Skip if the QR session TTL has expired and payment is still pending
     created_at = payment.get("created_at")
     if created_at is not None:
@@ -1234,6 +1239,21 @@ async def _sync_khqr_payment_status(db: Session, *, payment: dict) -> dict:
     except Exception as exc:
         logger.warning("KHQR status check failed unexpectedly: %s", exc)
         return payment
+
+    if result.status == KHQRPaymentStatus.GEO_BLOCKED:
+        # Bakong blocks our server IP — stop polling, flag for manual confirmation
+        _apply_payment_status(
+            db,
+            payment=payment,
+            normalized_status="pending",
+            metadata_patch={
+                "khqr_geo_blocked": True,
+                "khqr_geo_blocked_at": int(time.time()),
+                "khqr_manual_confirmation_required": True,
+            },
+        )
+        db.commit()
+        return _load_payment_record(db, payment["id"])
 
     if result.status == KHQRPaymentStatus.ERROR:
         # Network / auth error — don't change DB, let frontend retry
@@ -1705,6 +1725,41 @@ async def sweep_khqr_payments(
             results["errors"] += 1
 
     return {"message": "KHQR sweep complete", "results": results}
+
+
+@router.post("/admin/{payment_id}/confirm-khqr")
+async def admin_confirm_khqr(
+    payment_id: str,
+    current_user: dict = Depends(require_roles("admin", "superadmin")),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin: manually mark a KHQR payment as completed.
+    Use when the Bakong API is geo-blocked and automatic confirmation is impossible.
+    The admin should verify receipt of funds in the Bakong/ACLEDA app before confirming.
+    """
+    payment = _load_payment_record(db, payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment["provider"] != "bakong_khqr":
+        raise HTTPException(status_code=400, detail="Payment is not a KHQR payment")
+    if payment["status"] == "completed":
+        return {"message": "Already completed", "status": "completed"}
+
+    previous_status = str(payment["status"])
+    _apply_payment_status(
+        db,
+        payment=payment,
+        normalized_status="completed",
+        metadata_patch={
+            "khqr_manual_confirmed_at": int(time.time()),
+            "khqr_manual_confirmed_by": str(current_user.get("id")),
+        },
+    )
+    db.commit()
+    if previous_status != "completed":
+        _send_booking_emails(db, payment["booking_id"], "confirmation")
+    return {"message": "KHQR payment manually confirmed", "status": "completed"}
 
 
 @router.post("/{payment_id}/refund")
