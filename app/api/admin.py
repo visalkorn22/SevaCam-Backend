@@ -11,6 +11,7 @@ from app.core.auth import require_roles
 from app.core.audit import log_audit
 from app.core.database import get_db
 from app.core.config import settings
+from app.core.staff_profiles import calculate_experience_level, round_average_rating
 from app.models.schemas import LocationCreate, LocationUpdate, LocationResponse
 import uuid
 
@@ -39,13 +40,37 @@ def list_staff(
     current_user: dict = Depends(require_roles("admin", "superadmin")),
     db: Session = Depends(get_db),
 ):
+    stats_select = "NULL AS average_rating, 0 AS review_count, 0 AS completed_bookings"
+    stats_join = ""
+    if settings.FEATURE_SET == "full":
+        stats_select = """
+            stats.average_rating AS average_rating,
+            COALESCE(stats.review_count, 0) AS review_count,
+            COALESCE(stats.completed_bookings, 0) AS completed_bookings
+        """
+        stats_join = """
+            LEFT JOIN (
+                SELECT
+                    b.staff_id,
+                    COUNT(CASE WHEN b.status = 'completed' THEN 1 END) AS completed_bookings,
+                    AVG(CASE WHEN b.status = 'completed' AND r.is_approved = TRUE THEN r.rating END) AS average_rating,
+                    COUNT(CASE WHEN b.status = 'completed' AND r.is_approved = TRUE THEN 1 END) AS review_count
+                FROM bookings b
+                LEFT JOIN reviews r ON r.booking_id = b.id
+                GROUP BY b.staff_id
+            ) stats ON stats.staff_id = u.id
+        """
+
     result = db.execute(
         text(
-            """
-            SELECT id, full_name, avatar_url, phone, role, is_active
-            FROM users
-            WHERE role IN ('staff', 'admin', 'superadmin')
-            ORDER BY full_name
+            f"""
+            SELECT
+                u.id, u.full_name, u.avatar_url, u.phone, u.email, u.role, u.is_active,
+                {stats_select}
+            FROM users u
+            {stats_join}
+            WHERE u.role IN ('staff', 'admin', 'superadmin')
+            ORDER BY u.full_name
             """
         )
     )
@@ -57,8 +82,13 @@ def list_staff(
             "full_name": row[1],
             "avatar_url": row[2],
             "phone": row[3],
-            "role": "admin" if row[4] == "superadmin" else row[4],
-            "is_active": bool(row[5]),
+            "email": row[4],
+            "role": "admin" if row[5] == "superadmin" else row[5],
+            "is_active": bool(row[6]),
+            "average_rating": round_average_rating(row[7]),
+            "review_count": int(row[8] or 0),
+            "completed_bookings": int(row[9] or 0),
+            "experience_level": calculate_experience_level(row[7], row[9]),
         }
         for row in staff_rows
     ]

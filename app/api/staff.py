@@ -7,6 +7,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.core.database import get_db
 from app.core.auth import get_current_user, require_permissions, require_roles, is_admin
 from app.core.audit import log_audit
+from app.core.staff_profiles import (
+    calculate_experience_level,
+    normalize_staff_skills,
+    round_average_rating,
+)
 from app.models.schemas import (
     StaffServiceCreate,
     StaffServiceResponse,
@@ -31,6 +36,20 @@ def _normalize_uuid_fields(row: dict, fields: list[str]) -> dict:
         if row.get(field) is not None:
             row[field] = str(row[field])
     return row
+
+
+def _serialize_staff_service_assignment(row: dict) -> dict:
+    data = _normalize_uuid_fields(row, ["id", "staff_id", "service_id"])
+    data["skills"] = normalize_staff_skills(data.get("skills"))
+    data["bio"] = (data.get("bio") or "").strip() or None
+    data["average_rating"] = round_average_rating(data.get("average_rating"))
+    data["review_count"] = int(data.get("review_count") or 0)
+    data["completed_bookings"] = int(data.get("completed_bookings") or 0)
+    data["experience_level"] = calculate_experience_level(
+        data.get("average_rating"),
+        data.get("completed_bookings"),
+    )
+    return data
 
 @router.get("/dashboard")
 async def staff_dashboard(
@@ -164,12 +183,12 @@ async def assign_staff_to_service(
                 INSERT INTO staff_services (
                     id, staff_id, service_id,
                     price_override, deposit_override, duration_override, buffer_override, capacity_override,
-                    is_bookable, is_temporarily_unavailable, admin_only
+                    is_bookable, is_temporarily_unavailable, admin_only, skills, bio
                 )
                 VALUES (
                     :id, :staff_id, :service_id,
                     :price_override, :deposit_override, :duration_override, :buffer_override, :capacity_override,
-                    :is_bookable, :is_temporarily_unavailable, :admin_only
+                    :is_bookable, :is_temporarily_unavailable, :admin_only, :skills, :bio
                 )
                 ON CONFLICT (staff_id, service_id) DO UPDATE
                 SET price_override = EXCLUDED.price_override,
@@ -179,7 +198,9 @@ async def assign_staff_to_service(
                     capacity_override = EXCLUDED.capacity_override,
                     is_bookable = EXCLUDED.is_bookable,
                     is_temporarily_unavailable = EXCLUDED.is_temporarily_unavailable,
-                    admin_only = EXCLUDED.admin_only
+                    admin_only = EXCLUDED.admin_only,
+                    skills = EXCLUDED.skills,
+                    bio = EXCLUDED.bio
                 RETURNING *
                 """
             ),
@@ -195,6 +216,8 @@ async def assign_staff_to_service(
                 "is_bookable": assignment.is_bookable,
                 "is_temporarily_unavailable": assignment.is_temporarily_unavailable,
                 "admin_only": assignment.admin_only,
+                "skills": normalize_staff_skills(assignment.skills),
+                "bio": (assignment.bio or "").strip() or None,
             }
         ).fetchone()
         log_audit(
@@ -202,7 +225,7 @@ async def assign_staff_to_service(
             current_user.get("id"),
             "create",
             "staff_service_assignment",
-            assignment_id,
+            str(result._mapping["id"]),
             assignment.model_dump(),
         )
         db.commit()
@@ -210,10 +233,7 @@ async def assign_staff_to_service(
         db.rollback()
         raise HTTPException(status_code=400, detail="Unable to assign staff to service")
 
-    return _normalize_uuid_fields(
-        dict(result._mapping),
-        ["id", "staff_id", "service_id"],
-    )
+    return _serialize_staff_service_assignment(dict(result._mapping))
 
 @router.put("/services/{assignment_id}", response_model=StaffServiceResponse)
 async def update_staff_service_assignment(
@@ -250,6 +270,12 @@ async def update_staff_service_assignment(
     if payload.admin_only is not None:
         updates.append("admin_only = :admin_only")
         params["admin_only"] = payload.admin_only
+    if "skills" in payload.model_fields_set:
+        updates.append("skills = :skills")
+        params["skills"] = normalize_staff_skills(payload.skills)
+    if "bio" in payload.model_fields_set:
+        updates.append("bio = :bio")
+        params["bio"] = (payload.bio or "").strip() or None
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -267,10 +293,7 @@ async def update_staff_service_assignment(
         text("SELECT * FROM staff_services WHERE id = :id"),
         {"id": assignment_id},
     ).fetchone()
-    return _normalize_uuid_fields(
-        dict(updated._mapping),
-        ["id", "staff_id", "service_id"],
-    )
+    return _serialize_staff_service_assignment(dict(updated._mapping))
 
 @router.get("/services/{staff_id}", response_model=List[dict])
 async def get_staff_services(
@@ -286,7 +309,8 @@ async def get_staff_services(
             SELECT s.*, ss.id as assignment_id,
                    ss.price_override, ss.deposit_override, ss.duration_override,
                    ss.buffer_override, ss.capacity_override,
-                   ss.is_bookable, ss.is_temporarily_unavailable, ss.admin_only
+                   ss.is_bookable, ss.is_temporarily_unavailable, ss.admin_only,
+                   ss.skills, ss.bio
             FROM services s
             JOIN staff_services ss ON s.id = ss.service_id
             WHERE ss.staff_id = :staff_id
@@ -302,7 +326,11 @@ async def get_staff_services(
     
     services = result.fetchall()
     return [
-        _normalize_uuid_fields(dict(row._mapping), ["id", "assignment_id"])
+        {
+            **_normalize_uuid_fields(dict(row._mapping), ["id", "assignment_id"]),
+            "skills": normalize_staff_skills(row._mapping.get("skills")),
+            "bio": (row._mapping.get("bio") or "").strip() or None,
+        }
         for row in services
     ]
 
@@ -325,18 +353,52 @@ async def remove_staff_from_service(
     return {"message": "Staff removed from service"}
 
 @router.get("/{service_id}/staff", response_model=List[dict])
-async def get_service_staff(service_id: str, db: Session = Depends(get_db)):
-    """Get all staff members assigned to a service"""
+async def get_service_staff(
+    service_id: str,
+    current_user: dict = Depends(require_permissions("staff:manage")),
+    db: Session = Depends(get_db),
+):
+    """Get all staff members assigned to a service for admin management."""
     result = db.execute(
         text(
             """
-            SELECT u.id, u.full_name, u.phone, u.avatar_url, u.role, ss.id as assignment_id,
+            SELECT
+                   u.id, u.full_name, u.email, u.phone, u.avatar_url, u.role, ss.id as assignment_id,
                    ss.price_override, ss.deposit_override, ss.duration_override,
                    ss.buffer_override, ss.capacity_override,
-                   ss.is_bookable, ss.is_temporarily_unavailable, ss.admin_only
+                   ss.is_bookable, ss.is_temporarily_unavailable, ss.admin_only,
+                   ss.skills, ss.bio,
+                   (
+                       SELECT COUNT(*)
+                       FROM bookings b
+                       WHERE b.service_id = ss.service_id
+                         AND b.staff_id = ss.staff_id
+                         AND b.status = 'completed'
+                   ) AS completed_bookings,
+                   (
+                       SELECT AVG(r.rating)
+                       FROM bookings b
+                       LEFT JOIN reviews r
+                         ON r.booking_id = b.id
+                        AND r.is_approved = TRUE
+                       WHERE b.service_id = ss.service_id
+                         AND b.staff_id = ss.staff_id
+                         AND b.status = 'completed'
+                   ) AS average_rating,
+                   (
+                       SELECT COUNT(*)
+                       FROM bookings b
+                       JOIN reviews r
+                         ON r.booking_id = b.id
+                        AND r.is_approved = TRUE
+                       WHERE b.service_id = ss.service_id
+                         AND b.staff_id = ss.staff_id
+                         AND b.status = 'completed'
+                   ) AS review_count
             FROM users u
             JOIN staff_services ss ON u.id = ss.staff_id
             WHERE ss.service_id = :service_id AND u.is_active = TRUE
+            ORDER BY u.full_name
             """
         ),
         {"service_id": service_id}
@@ -347,18 +409,25 @@ async def get_service_staff(service_id: str, db: Session = Depends(get_db)):
         {
             "id": str(row[0]) if row[0] is not None else None,
             "full_name": row[1],
-            "phone": row[2],
-            "avatar_url": row[3],
-            "role": row[4],
-            "assignment_id": str(row[5]) if row[5] is not None else None,
-            "price_override": row[6],
-            "deposit_override": row[7],
-            "duration_override": row[8],
-            "buffer_override": row[9],
-            "capacity_override": row[10],
-            "is_bookable": row[11],
-            "is_temporarily_unavailable": row[12],
-            "admin_only": row[13],
+            "email": row[2],
+            "phone": row[3],
+            "avatar_url": row[4],
+            "role": row[5],
+            "assignment_id": str(row[6]) if row[6] is not None else None,
+            "price_override": row[7],
+            "deposit_override": row[8],
+            "duration_override": row[9],
+            "buffer_override": row[10],
+            "capacity_override": row[11],
+            "is_bookable": row[12],
+            "is_temporarily_unavailable": row[13],
+            "admin_only": row[14],
+            "skills": normalize_staff_skills(row[15]),
+            "bio": (row[16] or "").strip() or None,
+            "completed_bookings": int(row[17] or 0),
+            "average_rating": round_average_rating(row[18]),
+            "review_count": int(row[19] or 0),
+            "experience_level": calculate_experience_level(row[18], row[17]),
         }
         for row in staff
     ]

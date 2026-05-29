@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
@@ -10,6 +10,9 @@ import uuid
 
 from app.core.database import get_db
 from app.core.auth import get_current_user, require_roles, get_permissions_for_role
+from app.core.config import settings
+from app.core.staff_profiles import calculate_experience_level, round_average_rating
+from app.services.avatar_service import delete_avatar, save_avatar
 
 router = APIRouter()
 
@@ -27,6 +30,10 @@ class UserResponse(BaseModel):
     timezone: Optional[str] = None
     is_active: bool
     created_at: datetime
+    average_rating: Optional[float] = None
+    review_count: Optional[int] = None
+    completed_bookings: Optional[int] = None
+    experience_level: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
@@ -56,7 +63,65 @@ def _serialize_user(row) -> dict:
     data = dict(row._mapping)
     if "id" in data and data["id"] is not None:
         data["id"] = str(data["id"])
+    if "average_rating" in data:
+        data["average_rating"] = round_average_rating(data.get("average_rating"))
+    if "review_count" in data:
+        data["review_count"] = int(data.get("review_count") or 0)
+    if "completed_bookings" in data:
+        data["completed_bookings"] = int(data.get("completed_bookings") or 0)
+    if data.get("role") in {"staff", "admin", "superadmin"}:
+        data["experience_level"] = calculate_experience_level(
+            data.get("average_rating"),
+            data.get("completed_bookings"),
+        )
+    else:
+        data["experience_level"] = None
     return data
+
+
+def _user_stats_sql(prefix: str = "u") -> tuple[str, str]:
+    if settings.FEATURE_SET != "full":
+        return (
+            "NULL AS average_rating, 0 AS review_count, 0 AS completed_bookings",
+            "",
+        )
+
+    return (
+        """
+        stats.average_rating AS average_rating,
+        COALESCE(stats.review_count, 0) AS review_count,
+        COALESCE(stats.completed_bookings, 0) AS completed_bookings
+        """,
+        f"""
+        LEFT JOIN (
+            SELECT
+                b.staff_id,
+                COUNT(CASE WHEN b.status = 'completed' THEN 1 END) AS completed_bookings,
+                AVG(CASE WHEN b.status = 'completed' AND r.is_approved = TRUE THEN r.rating END) AS average_rating,
+                COUNT(CASE WHEN b.status = 'completed' AND r.is_approved = TRUE THEN 1 END) AS review_count
+            FROM bookings b
+            LEFT JOIN reviews r ON r.booking_id = b.id
+            GROUP BY b.staff_id
+        ) stats ON stats.staff_id = {prefix}.id
+        """,
+    )
+
+
+def _fetch_user_with_stats(db: Session, user_id: str):
+    stats_select, stats_join = _user_stats_sql("u")
+    return db.execute(
+        text(
+            f"""
+            SELECT
+                u.id, u.email, u.full_name, u.role, u.phone, u.avatar_url, u.timezone, u.is_active, u.created_at,
+                {stats_select}
+            FROM users u
+            {stats_join}
+            WHERE u.id = :id
+            """
+        ),
+        {"id": user_id},
+    ).fetchone()
 
 
 def _ensure_self_or_admin(current_user: dict, user_id: str) -> None:
@@ -150,24 +215,28 @@ def list_users(
     db: Session = Depends(get_db),
 ):
     _ensure_permission(db, current_user, "staff:manage")
-    query = """
-        SELECT id, email, full_name, role, phone, avatar_url, timezone, is_active, created_at
-        FROM users
+    stats_select, stats_join = _user_stats_sql("u")
+    query = f"""
+        SELECT
+            u.id, u.email, u.full_name, u.role, u.phone, u.avatar_url, u.timezone, u.is_active, u.created_at,
+            {stats_select}
+        FROM users u
+        {stats_join}
         WHERE 1=1
     """
     params = {"skip": skip, "limit": limit}
 
     if role:
-        query += " AND role = :role"
+        query += " AND u.role = :role"
         params["role"] = role
     if is_active is not None:
-        query += " AND is_active = :is_active"
+        query += " AND u.is_active = :is_active"
         params["is_active"] = is_active
     if search:
-        query += " AND (LOWER(full_name) LIKE :search OR LOWER(email) LIKE :search OR LOWER(phone) LIKE :search)"
+        query += " AND (LOWER(u.full_name) LIKE :search OR LOWER(u.email) LIKE :search OR LOWER(u.phone) LIKE :search)"
         params["search"] = f"%{search.lower()}%"
 
-    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :skip"
+    query += " ORDER BY u.created_at DESC LIMIT :limit OFFSET :skip"
 
     result = db.execute(text(query), params)
     return [_serialize_user(row) for row in result.fetchall()]
@@ -210,12 +279,11 @@ def create_user(
     password_hash = pwd_context.hash(payload.password)
     user_id = str(uuid.uuid4())
 
-    created = db.execute(
+    db.execute(
         text(
             """
             INSERT INTO users (id, email, full_name, role, phone, timezone, password_hash, is_active)
             VALUES (:id, :email, :full_name, :role, :phone, :timezone, :password_hash, :is_active)
-            RETURNING id, email, full_name, role, phone, avatar_url, timezone, is_active, created_at
             """
         ),
         {
@@ -228,10 +296,10 @@ def create_user(
             "password_hash": password_hash,
             "is_active": payload.is_active if payload.is_active is not None else True,
         },
-    ).fetchone()
+    )
     db.commit()
 
-    return _serialize_user(created)
+    return _serialize_user(_fetch_user_with_stats(db, user_id))
 
 
 @router.get("/users/{user_id}", response_model=UserResponse)
@@ -242,16 +310,7 @@ def get_user(
 ):
     _ensure_self_or_admin(current_user, user_id)
 
-    result = db.execute(
-        text(
-            """
-            SELECT id, email, full_name, role, phone, avatar_url, timezone, is_active, created_at
-            FROM users
-            WHERE id = :id
-            """
-        ),
-        {"id": user_id},
-    ).fetchone()
+    result = _fetch_user_with_stats(db, user_id)
 
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
@@ -329,11 +388,11 @@ def update_user(
         UPDATE users
         SET {", ".join(updates)}
         WHERE id = :id
-        RETURNING id, email, full_name, role, phone, avatar_url, timezone, is_active, created_at
     """
-    updated = db.execute(text(query), params).fetchone()
+    db.execute(text(query), params)
     db.commit()
 
+    updated = _fetch_user_with_stats(db, user_id)
     return _serialize_user(updated)
 
 
@@ -351,14 +410,79 @@ def update_user_status(
             UPDATE users
             SET is_active = :is_active
             WHERE id = :id
-            RETURNING id, email, full_name, role, phone, avatar_url, timezone, is_active, created_at
             """
         ),
         {"id": user_id, "is_active": payload.is_active},
-    ).fetchone()
+    )
     db.commit()
 
-    if not updated:
+    refreshed = _fetch_user_with_stats(db, user_id)
+    if not refreshed:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return _serialize_user(updated)
+    return _serialize_user(refreshed)
+
+
+@router.post("/users/{user_id}/avatar", response_model=UserResponse)
+async def upload_user_avatar(
+    user_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_self_or_admin(current_user, user_id)
+    if current_user.get("id") != user_id:
+        _ensure_permission(db, current_user, "staff:manage")
+
+    try:
+        avatar_url = await save_avatar(user_id, file)
+    except ValueError as exc:
+        error_code = str(exc)
+        messages = {
+            "invalid_file_type": "Please upload a JPG, PNG, or WebP image.",
+            "file_too_large": "File too large, max 5 MB.",
+            "invalid_image": "File could not be read as an image.",
+        }
+        raise HTTPException(
+            status_code=400,
+            detail=messages.get(error_code, "Upload failed."),
+        )
+
+    try:
+        db.execute(
+            text("UPDATE users SET avatar_url = :avatar_url WHERE id = :id"),
+            {"id": user_id, "avatar_url": avatar_url},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        delete_avatar(user_id)
+        raise HTTPException(status_code=500, detail="Could not save avatar.")
+
+    refreshed = _fetch_user_with_stats(db, user_id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="User not found")
+    return _serialize_user(refreshed)
+
+
+@router.delete("/users/{user_id}/avatar", response_model=UserResponse)
+def remove_user_avatar(
+    user_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_self_or_admin(current_user, user_id)
+    if current_user.get("id") != user_id:
+        _ensure_permission(db, current_user, "staff:manage")
+
+    delete_avatar(user_id)
+    db.execute(
+        text("UPDATE users SET avatar_url = NULL WHERE id = :id"),
+        {"id": user_id},
+    )
+    db.commit()
+
+    refreshed = _fetch_user_with_stats(db, user_id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="User not found")
+    return _serialize_user(refreshed)

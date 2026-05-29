@@ -7,6 +7,11 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.auth import require_permissions
 from app.core.config import settings
+from app.core.staff_profiles import (
+    calculate_experience_level,
+    normalize_staff_skills,
+    round_average_rating,
+)
 from app.core.image_moderation import moderate_image
 from app.models.schemas import (
     ServiceCreate,
@@ -666,7 +671,35 @@ async def get_service_staff(service_id: str, db: Session = Depends(get_db)):
             """
             SELECT u.id, u.full_name, u.avatar_url,
                    ss.price_override, ss.deposit_override, ss.duration_override,
-                   ss.buffer_override, ss.capacity_override
+                   ss.buffer_override, ss.capacity_override,
+                   ss.skills, ss.bio,
+                   (
+                       SELECT COUNT(*)
+                       FROM bookings b
+                       WHERE b.service_id = ss.service_id
+                         AND b.staff_id = ss.staff_id
+                         AND b.status = 'completed'
+                   ) AS completed_bookings,
+                   (
+                       SELECT AVG(r.rating)
+                       FROM bookings b
+                       LEFT JOIN reviews r
+                         ON r.booking_id = b.id
+                        AND r.is_approved = TRUE
+                       WHERE b.service_id = ss.service_id
+                         AND b.staff_id = ss.staff_id
+                         AND b.status = 'completed'
+                   ) AS average_rating,
+                   (
+                       SELECT COUNT(*)
+                       FROM bookings b
+                       JOIN reviews r
+                         ON r.booking_id = b.id
+                        AND r.is_approved = TRUE
+                       WHERE b.service_id = ss.service_id
+                         AND b.staff_id = ss.staff_id
+                         AND b.status = 'completed'
+                   ) AS review_count
             FROM staff_services ss
             JOIN users u ON u.id = ss.staff_id
             WHERE ss.service_id = :service_id AND u.is_active = TRUE
@@ -690,6 +723,12 @@ async def get_service_staff(service_id: str, db: Session = Depends(get_db)):
             "duration_override": row[5],
             "buffer_override": row[6],
             "capacity_override": row[7],
+            "skills": normalize_staff_skills(row[8]),
+            "bio": (row[9] or "").strip() or None,
+            "completed_bookings": int(row[10] or 0),
+            "average_rating": round_average_rating(row[11]),
+            "review_count": int(row[12] or 0),
+            "experience_level": calculate_experience_level(row[11], row[10]),
         }
         for row in result.fetchall()
     ]

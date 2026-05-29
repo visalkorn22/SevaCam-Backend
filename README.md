@@ -171,6 +171,8 @@ docker compose exec backend python -m app.seed
 
 docker compose exec backend python -m app.seed_admin_user
 
+docker compose exec backend python -m app.seed_sample_staff_profiles
+
 docker compose restart
 
 # Bootstrap an initial admin/superadmin (one-time):

@@ -139,6 +139,8 @@ class StaffServiceCreate(BaseModel):
     is_bookable: Optional[bool] = True
     is_temporarily_unavailable: Optional[bool] = False
     admin_only: Optional[bool] = False
+    skills: List[str] = Field(default_factory=list)
+    bio: Optional[str] = None
 
 
 class StaffServiceUpdate(BaseModel):
@@ -150,6 +152,8 @@ class StaffServiceUpdate(BaseModel):
     is_bookable: Optional[bool] = None
     is_temporarily_unavailable: Optional[bool] = None
     admin_only: Optional[bool] = None
+    skills: Optional[List[str]] = None
+    bio: Optional[str] = None
 
 class StaffServiceResponse(BaseModel):
     id: str
@@ -164,6 +168,12 @@ class StaffServiceResponse(BaseModel):
     is_bookable: bool = True
     is_temporarily_unavailable: bool = False
     admin_only: bool = False
+    skills: List[str] = Field(default_factory=list)
+    bio: Optional[str] = None
+    average_rating: Optional[float] = None
+    review_count: int = 0
+    completed_bookings: int = 0
+    experience_level: str = "Beginner"
 
 # Location Schemas
 class LocationCreate(BaseModel):
